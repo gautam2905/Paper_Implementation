@@ -9,13 +9,6 @@ ale = ALEInterface()
 from PIL import Image
 from tqdm import tqdm
 
-gym.register_envs(ale_py)
-
-env = gym.make("ALE/BeamRider-v5", render_mode="rgb_array", obs_type="grayscale")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
-
 def preprocess(rgb_image):
     grayscale_image = np.dot(rgb_image[..., :3], [0.2989, 0.5870, 0.1140])
     grayscale_image = np.clip(grayscale_image, 0, 255)
@@ -38,7 +31,7 @@ def render_rgbarray(env):
 #     return np.array(img)
 
 
-from pyparsing import deque
+from collections import deque  # Not from pyparsing
 import random 
 
 class DQN(nn.Module):
@@ -82,23 +75,6 @@ class ReplayMemory:
         return len(self.memory)
     
 
-BATCH_SIZE = 32
-GAMMA = 0.99  
-EPS_START = 1.0 
-EPS_END = 0.1 
-EPS_DECAY = 200000 
-TARGET_UPDATE_FREQUENCY = 1000 
-LEARNING_RATE = 0.00025
-MEMORY_SIZE = 100000 
-NUM_EPISODES = 500 
-
-policy_net = DQN((84, 84), env.action_space.n, 32, 4).to(device)
-target_net = DQN((84, 84), env.action_space.n, 32, 4).to(device)
-target_net.load_state_dict(policy_net.state_dict())
-target_net.eval()
-
-optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
-memory = ReplayMemory(MEMORY_SIZE)
 
 
 
@@ -145,37 +121,69 @@ def optimize():
     optimizer.step()
             
 
-for episode in tqdm(range(NUM_EPISODES)):
-    obs, info = env.reset()
-    frame = preprocess(obs)
-    state = np.stack([frame] * 4, axis=0)
-    
-    done = False
-    while not done:
-        action = epsilon_greedy_action(state)
-        # print(action_tensor)
-        # action = action_tensor.item()
-        observation, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
+if __name__ == "__main__":
 
-        next_frame = preprocess(observation)
-        next_state = np.roll(state, -1, axis=0)
-        next_state[-1] = next_frame
+    gym.register_envs(ale_py)
 
-        memory.add(state, action, reward, next_state, done)
-
-        state = next_state
-
-        optimize()
-
-    if episode % TARGET_UPDATE_FREQUENCY == 0:
-        target_net.load_state_dict(policy_net.state_dict())
-
-print("Training complete!")
-env.close()
+    env = gym.make("ALE/BeamRider-v5", render_mode="rgb_array", )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
 
+    BATCH_SIZE = 64  # Increase from 32 (you have good GPU)
+    GAMMA = 0.99  # Keep this
+    EPS_START = 1.0 
+    EPS_END = 0.01  # Lower from 0.1 for better exploitation later
+    EPS_DECAY = 1_000_000  # Increase from 200k for slower decay
+    TARGET_UPDATE_FREQUENCY = 10_000  # Update every 10k steps (not episodes!)
+    LEARNING_RATE = 0.0001  # Lower from 0.00025 for stability
+    MEMORY_SIZE = 200_000  # Increase from 100k (more diverse experiences)
+    NUM_EPISODES = 2000  # Increase from 500 for better convergence
+    WARMUP_STEPS = 50_000  # Add this - fill buffer before training 
 
-import os
-save_dir = os.curdir
-torch.save(policy_net.state_dict(), os.path.join(save_dir, "best_model.pth"))
+    policy_net = DQN((84, 84), env.action_space.n, 32, 4).to(device)
+    target_net = DQN((84, 84), env.action_space.n, 32, 4).to(device)
+    target_net.load_state_dict(policy_net.state_dict())
+    target_net.eval()
+
+    optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
+    memory = ReplayMemory(MEMORY_SIZE)
+
+    print("training started...")
+
+    for episode in tqdm(range(NUM_EPISODES)):
+        obs, info = env.reset()
+        frame = preprocess(obs)
+        state = np.stack([frame] * 4, axis=0)
+        
+        done = False
+        while not done:
+            action = epsilon_greedy_action(state)
+            # print(action_tensor)
+            # action = action_tensor.item()
+            observation, reward, terminated, truncated, info = env.step(action)
+            reward = np.clip(reward, -1, 1) 
+            done = terminated or truncated
+
+            next_frame = preprocess(observation)
+            next_state = np.roll(state, -1, axis=0)
+            next_state[-1] = next_frame
+
+            memory.add(state, action, reward, next_state, done)
+
+            state = next_state
+
+            if steps_done % 4 == 0:
+                optimize()
+
+        if episode % TARGET_UPDATE_FREQUENCY == 0:
+            target_net.load_state_dict(policy_net.state_dict())
+
+
+    print("Training complete!")
+    env.close()
+
+
+    import os
+    save_dir = os.curdir
+    torch.save(policy_net.state_dict(), os.path.join(save_dir, "best_model.pth"))
